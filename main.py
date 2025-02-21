@@ -1,36 +1,19 @@
+import os
+import subprocess
 import sys
 import time
-
-from fastapi import FastAPI
-from queue import Queue, Empty
-from pydantic import BaseModel, ValidationError, NaiveDatetime
-from typing import Optional, Dict
-from datetime import datetime, timedelta
-from threading import Thread
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from queue import Queue, Empty
+from threading import Thread
+from typing import Optional, Dict
+
+import yaml
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel, ValidationError, NaiveDatetime
 
 debug = True
-
-tenants_dict = {
-    "tenants": {
-        "konstfack": {
-            "listen_apikey": "random123",
-            "netbox_name": "Konstfack",
-            "netbox_api_token": "random456",
-            "jobs": {
-                "netbox_devices": {
-                    "enabled": True,
-                    "push_minimum_interval": 5,
-                    "push": None,
-                    "push_queued": False,
-                    "push_lasttime": datetime(1970,1,1),
-                    "lasttime": datetime.now(),
-                    "queue": Queue(),
-                }
-            }
-        }
-    }
-}
 
 
 # define pydantic basemodel for jobs
@@ -40,19 +23,20 @@ class Job(BaseModel):
         arbitrary_types_allowed = True
         json_encoders = {Queue: lambda v: "Queue"}
     push: Optional[str] = None  # can be target hostname or "all"
-    push_lasttime: NaiveDatetime
+    push_lasttime: NaiveDatetime = datetime(1970,1,1)
     push_queued: bool = False
     push_minimum_interval: int = 0
-    lasttime: NaiveDatetime
-    queue: Queue
-    enabled: bool
+    lasttime: NaiveDatetime = datetime.now()
+    queue: Queue = Queue()
+    enabled: bool = True
+    schedule_enabled: bool = False
+    run_on_start: bool = False
 
 
 # define pydantic basemodel for tenants
 class Tenant(BaseModel):
     listen_apikey: str
-    netbox_name: str
-    netbox_api_token: str
+    env_vars: Dict[str, str]
     jobs: Dict[str, Job]
 
 
@@ -68,8 +52,23 @@ class Trigger(BaseModel):
 
 
 class WebhookPost(BaseModel):
+    tenant_name: str
     job_name: str
     hostname: str
+
+
+tenants_parsed: Optional[Tenants] = None
+
+
+def get_tenants():
+    global tenants_parsed
+    if tenants_parsed is not None:
+        return tenants_parsed
+
+    with open("tenants.yml", "r") as f:
+        tenants_parsed = Tenants(**yaml.safe_load(f))
+
+    return tenants_parsed
 
 
 def execute_task(all_tenants: Tenants, trigger: Trigger):
@@ -109,7 +108,7 @@ def execute_task(all_tenants: Tenants, trigger: Trigger):
         all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].push_lasttime = datetime.now()
         all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].push_queued = False
     # Trigger at exact minute after whole hour, if ~1h has passed since last time
-    elif trigger.trigger_source == "timer" and (datetime.now() - job.lasttime) > timedelta(hours=1, seconds=-60) and \
+    elif trigger.trigger_source == "timer" and job.schedule_enabled and (datetime.now() - job.lasttime) > timedelta(hours=1, seconds=-60) and \
             datetime.now().minute == list(all_tenants.tenants.keys()).index(trigger.tenant_name):
         if debug:
             print(f"{datetime.now()} Execute from timer, exact minute: {trigger}")
@@ -125,7 +124,24 @@ def execute_task(all_tenants: Tenants, trigger: Trigger):
     try:
         # Popen execute job(hostname=trigger.hostname)
         print(f"exec {trigger.job_name} with args --hostname={trigger.hostname}")
-        pass
+        newenv = {
+            "PATH": f"{os.environ['PATH']}:/opt/tenant-webhook-listener/bin/"
+        }
+        for env_name, env_value in tenant.env_vars.items():
+            newenv[env_name] = env_value
+        # check if job is a scriptherder job
+        cmd = f"{trigger.job_name} --hostname={trigger.hostname}"
+        # check if scriptherder file exists
+        if os.path.isfile(f"/etc/scriptherder/{trigger.job_name}_{trigger.tenant_name}.ini"):
+            cmd = "/usr/local/bin/scriptherder --mode wrap --syslog --name clean_logs --" + cmd
+        # execute job
+        subprocess.run(cmd, shell=True, check=True, env={**os.environ, **newenv})
+    except subprocess.CalledProcessError as e:
+        print(f"{datetime.now()} {trigger.job_name} for {trigger.tenant_name} failed with exit code {e.returncode}")
+        # TODO: send notification
+    except Exception as e:
+        print(f"{datetime.now()} {trigger.job_name} for {trigger.tenant_name} failed with exception {e}")
+        # TODO: send notification
     finally:
         pass
         # update last run time
@@ -134,7 +150,7 @@ def execute_task(all_tenants: Tenants, trigger: Trigger):
 
 def scheduler_thread(q: Queue):
     try:
-        all_tenants = Tenants(**tenants_dict)
+        all_tenants = get_tenants()
     except ValidationError as e:
         print(e)
         sys.exit(1)
@@ -178,8 +194,30 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+header_scheme = APIKeyHeader(name="X-API-Key")
+
 @app.post("/webhook/")
-async def webhook(item: WebhookPost):
-    tenant_name = "konstfack"
-    scheduler_queue.put(Trigger(tenant_name=tenant_name, job_name=item.job_name, hostname=item.hostname, trigger_source="push"))
+async def webhook(item: WebhookPost, key: str = Depends(header_scheme)):
+    target_tenant: Optional[str] = None
+    all_tenants = get_tenants()
+
+    for tenant_name, tenant in all_tenants.tenants.items():
+        if tenant.listen_apikey is not None and tenant.listen_apikey == key:
+            target_tenant = tenant_name
+            break
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid API key"
+        )
+
+    if item.tenant_name != target_tenant:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mismatch between tenant_name in POST data and apikey tenant"
+        )
+
+    scheduler_queue.put(Trigger(tenant_name=target_tenant, job_name=item.job_name, hostname=item.hostname, trigger_source="push"))
+    # return ok status
+    return {"status": "ok"}
 
