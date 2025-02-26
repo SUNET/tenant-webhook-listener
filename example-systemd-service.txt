@@ -1,0 +1,18 @@
+[Unit]
+Description=webhook uvicorn daemon
+After=network.target
+
+[Service]
+Type=exec
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/tenant-webhook-listener/app/
+ExecStart=/opt/tenant-webhook-listener/venv/bin/uvicorn --uds /run/uvicorn/webhook.socket --workers 1 --root-path /api main:app
+KillMode=mixed
+PrivateTmp=true
+RuntimeDirectory=uvicorn
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target
+
