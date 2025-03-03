@@ -114,7 +114,7 @@ def execute_task(all_tenants: Tenants, trigger: Trigger):
         all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].push_lasttime = datetime.now()
         all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].push_queued = False
     # Trigger at exact minute after whole hour, if ~1h has passed since last time
-    elif trigger.trigger_source == "timer" and job.schedule_enabled and (datetime.now() - job.lasttime) > timedelta(hours=1, seconds=-60) and \
+    elif trigger.trigger_source == "timer" and job.schedule_enabled and (datetime.now() - job.lasttime) > timedelta(minutes=1) and \
             datetime.now().minute == list(all_tenants.tenants.keys()).index(trigger.tenant_name):
         logger.info(f"{datetime.now()} Execute from timer, exact minute: {trigger}")
         all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].lasttime = datetime.now()
