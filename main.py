@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import time
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from queue import Queue, Empty
@@ -12,8 +13,6 @@ import yaml
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, ValidationError, NaiveDatetime
-
-debug = True
 
 
 # define pydantic basemodel for jobs
@@ -67,8 +66,7 @@ def get_tenants():
     with open("tenants.yml", "r") as f:
         tenants_parsed = Tenants(**yaml.safe_load(f))
 
-    if debug:
-        print("Configured jobs in tenants.yml:")
+    logger.info("Configured jobs in tenants.yml:")
     for tenant_name, tenant in tenants_parsed.tenants.items():
         for job_name, job in tenant.jobs.items():
             if job.run_on_start:
@@ -76,9 +74,8 @@ def get_tenants():
                 tenants_parsed.tenants[tenant_name].jobs[job_name].lasttime = datetime(1970, 1, 1)
             else:
                 tenants_parsed.tenants[tenant_name].jobs[job_name].lasttime = datetime.now()
-            if debug:
-                print(f"{tenant_name} {job_name}: {'enabled' if job.enabled else 'disabled'}")
-                print(job)
+            logger.info(f"{tenant_name} {job_name}: {'enabled' if job.enabled else 'disabled'}")
+            logger.debug(job)
 
     return tenants_parsed
 
@@ -96,8 +93,7 @@ def execute_task(all_tenants: Tenants, trigger: Trigger):
             if job.push_queued and job.push != trigger.hostname:
                 trigger.hostname = "all"
                 all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].push_queued = False
-            if debug:
-                print(f"{datetime.now()} Execute from push: {trigger}")
+            logger.info(f"{datetime.now()} Execute from push: {trigger}")
             all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].push_lasttime = datetime.now()
         # if push event but minimum intercval has not passed, wait for timer
         else:
@@ -109,33 +105,29 @@ def execute_task(all_tenants: Tenants, trigger: Trigger):
                 all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].push_queued = True
                 all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].push = trigger.hostname
 
-            if debug:
-                print(f"Delay execute of: {trigger}")
+            logger.debug(f"Delay execute of: {trigger}")
             return
     # catch push events that got delayed trigger because of minimum interval
     elif trigger.trigger_source == "timer" and job.push_queued and (datetime.now() - job.push_lasttime) > timedelta(seconds=job.push_minimum_interval):
         trigger.hostname = job.push
-        if debug:
-            print(f"{datetime.now()} Execute from push, with delay: {trigger}")
+        logger.info(f"{datetime.now()} Execute from push, with delay: {trigger}")
         all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].push_lasttime = datetime.now()
         all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].push_queued = False
     # Trigger at exact minute after whole hour, if ~1h has passed since last time
     elif trigger.trigger_source == "timer" and job.schedule_enabled and (datetime.now() - job.lasttime) > timedelta(hours=1, seconds=-60) and \
             datetime.now().minute == list(all_tenants.tenants.keys()).index(trigger.tenant_name):
-        if debug:
-            print(f"{datetime.now()} Execute from timer, exact minute: {trigger}")
+        logger.info(f"{datetime.now()} Execute from timer, exact minute: {trigger}")
         all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].lasttime = datetime.now()
     # If above trigger didn't happen, after 2h execute as fallback anyway. This is to prevent jobs from getting stuck if something goes wrong.
     elif trigger.trigger_source == "timer" and (datetime.now() - job.lasttime) > timedelta(hours=2):
-        if debug:
-            print(f"{datetime.now()} Execute from timer, fallback: {trigger}")
+        logger.info(f"{datetime.now()} Execute from timer, fallback: {trigger}")
         all_tenants.tenants[trigger.tenant_name].jobs[trigger.job_name].lasttime = datetime.now()
     else:
         return
 
     try:
         # Popen execute job(hostname=trigger.hostname)
-        print(f"exec {trigger.job_name} with args --hostname={trigger.hostname}")
+        logger.debug(f"exec {trigger.job_name} with args --hostname={trigger.hostname}")
         newenv = {
             "PATH": f"{os.environ['PATH']}:/opt/tenant-webhook-listener/bin/"
         }
@@ -143,16 +135,13 @@ def execute_task(all_tenants: Tenants, trigger: Trigger):
             newenv[env_name] = env_value
         # check if job is a scriptherder job
         cmd = f"{trigger.job_name} --hostname={trigger.hostname}"
-        # check if scriptherder file exists
-        if os.path.isfile(f"/etc/scriptherder/{trigger.job_name}_{trigger.tenant_name}.ini"):
-            cmd = "/usr/local/bin/scriptherder --mode wrap --syslog --name clean_logs --" + cmd
         # execute job
         subprocess.run(cmd, shell=True, check=True, env={**os.environ, **newenv})
     except subprocess.CalledProcessError as e:
-        print(f"{datetime.now()} {trigger.job_name} for {trigger.tenant_name} failed with exit code {e.returncode}")
+        logger.warning(f"{datetime.now()} {trigger.job_name} for {trigger.tenant_name} failed with exit code {e.returncode}")
         # TODO: send notification
     except Exception as e:
-        print(f"{datetime.now()} {trigger.job_name} for {trigger.tenant_name} failed with exception {e}")
+        logger.error(f"{datetime.now()} {trigger.job_name} for {trigger.tenant_name} failed with exception {e}")
         # TODO: send notification
     finally:
         pass
@@ -205,6 +194,7 @@ async def lifespan(app: FastAPI):
     t1.join(timeout=10)
 
 app = FastAPI(lifespan=lifespan)
+logger = logging.getLogger('uvicorn.error')
 
 header_scheme = APIKeyHeader(name="X-API-Key")
 
