@@ -132,7 +132,8 @@ def execute_task(all_tenants: Tenants, trigger: Trigger):
             "PATH": f"{os.environ['PATH']}:/opt/tenant-webhook-listener/bin/"
         }
         for env_name, env_value in tenant.env_vars.items():
-            newenv[env_name] = env_value
+            if env_value:
+                newenv[env_name] = env_value
         # check if job is a scriptherder job
         cmd = f"{trigger.job_name} --hostname={trigger.hostname}"
         # execute job
