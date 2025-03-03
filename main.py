@@ -209,13 +209,13 @@ async def webhook(item: WebhookPost, key: str = Depends(header_scheme)):
             break
     else:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=401,
             detail="Missing or invalid API key"
         )
 
     if item.tenant_name != target_tenant:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=400,
             detail="Mismatch between tenant_name in POST data and apikey tenant"
         )
 
@@ -223,3 +223,14 @@ async def webhook(item: WebhookPost, key: str = Depends(header_scheme)):
     # return ok status
     return {"status": "ok"}
 
+
+@app.get("/status/")
+def status():
+    tenants = get_tenants()
+    if tenants and len(tenants.tenants.keys()) >= 1:
+        return {"status": "ok"}
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail="No tenants was parsed from configuration"
+        )
