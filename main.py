@@ -34,7 +34,7 @@ class Job(BaseModel):
 # define pydantic basemodel for tenants
 class Tenant(BaseModel):
     listen_apikey: str
-    env_vars: Dict[str, str]
+    env_vars: Dict[str, Optional[str]]
     jobs: Dict[str, Job]
 
 
