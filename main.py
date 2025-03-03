@@ -27,7 +27,6 @@ class Job(BaseModel):
     push_queued: bool = False
     push_minimum_interval: int = 0
     lasttime: NaiveDatetime = datetime.now()
-    queue: Queue = Queue()
     enabled: bool = True
     schedule_enabled: bool = False
     run_on_start: bool = False
@@ -67,6 +66,19 @@ def get_tenants():
 
     with open("tenants.yml", "r") as f:
         tenants_parsed = Tenants(**yaml.safe_load(f))
+
+    if debug:
+        print("Configured jobs in tenants.yml:")
+    for tenant_name, tenant in tenants_parsed.tenants.items():
+        for job_name, job in tenant.jobs.items():
+            if job.run_on_start:
+                # set lasttime to 1970 to force first run via fallback timer
+                tenants_parsed.tenants[tenant_name].jobs[job_name].lasttime = datetime(1970, 1, 1)
+            else:
+                tenants_parsed.tenants[tenant_name].jobs[job_name].lasttime = datetime.now()
+            if debug:
+                print(f"{tenant_name} {job_name}: {'enabled' if job.enabled else 'disabled'}")
+                print(job)
 
     return tenants_parsed
 
